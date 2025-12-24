@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-demo
+  labels:
+    app: nfs-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nfs-demo
+  template:
+    metadata:
+      labels:
+        app: nfs-demo
+    spec:
+      containers:
+        - name: nfs-demo
+          image: tushardashpute/nfs-demo:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: nfs-data
+              mountPath: /data
+      volumes:
+        - name: nfs-data
+          persistentVolumeClaim:
+            claimName: nfs-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nfs-demo
+spec:
+  selector:
+    app: nfs-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
