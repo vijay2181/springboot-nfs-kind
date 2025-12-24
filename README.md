@@ -1,79 +1,163 @@
-# Spring Boot + NFS on kind Kubernetes
+# Spring Boot + NFS + K3s Setup
 
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot![Kubernetes](https://img.shields.io/badge/Kubernetes-1![kind](https://img.shields.io/badge/kind-local%20Complete demo showing a Spring Boot application writing files to an NFS-backed PersistentVolume on a **kind** Kubernetes cluster.
+---
 
-## Features
+## NFS SERVER
 
-- ✅ Spring Boot REST API to write/read files
-- ✅ NFS PersistentVolume (RWX mode)
-- ✅ kind cluster setup
-- ✅ Docker containerization
-- ✅ Production-ready YAML manifests
-
-## Prerequisites
+- **Server:** nfs-server, x86_64, Ubuntu Version 20.04 - Focal Fossa  
+- **Specs:** SMALL 2 vCPUs / 4GB / 100GB Disk  
+- **SSH:** `ssh onecloud-user@9.114.114.215`
 
 ```bash
-# Required tools
-- Docker
-- kind (local Kubernetes)
-- kubectl
-- JDK 17+
-- Maven (or ./mvnw wrapper)
-- NFS server on host (Linux/macOS)
+sudo -i
+apt update
 ```
 
-## 🚀 Quick Start
+## Disk Info
+```
+df -hT
+lsblk
+```
+- Disk is 100 GB
+- Only 47 GB is partitioned as sda3
+- Out of that 47 GB: 23.5 GB is used by Logical Volume /
+- Remaining ~23.5 GB is FREE inside LVM
+- ~53 GB is completely unpartitioned
 
-### 1. Clone & Build
+## Extend sda3 to full disk
+```
+sudo growpart /dev/sda 3
+lsblk  # Verify sda3 ~97G
+sudo pvresize /dev/sda3
+sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+sudo resize2fs /dev/ubuntu-vg/ubuntu-lv
+df -h /  # Final verification
 
-```bash
-git clone https://github.com/tushardashpute/springboot-nfs-kind-demo.git
-cd springboot-nfs-kind-demo
-
-# Build Spring Boot app
-cd nfs-demo
-./mvnw clean package
-cd ..
 ```
 
-### 2. Build Docker Image
+## Install Java
+```
+git clone https://github.com/vijay2181/springboot-nfs-k3s.git
+cd springboot-nfs-k3s
+mvn clean package
 
-```bash
-docker build -t tushardashpute/nfs-demo:latest .
-# docker push tushardashpute/nfs-demo:latest  # if using external registry
+Output in target/:
+
+classes
+generated-sources
+generated-test-sources
+maven-archiver
+maven-status
+nfs-demo-0.0.1-SNAPSHOT.jar
+nfs-demo-0.0.1-SNAPSHOT.jar.original
+surefire-reports
+test-classes
+
 ```
 
-Update `k8s/deployment.yaml` with your image tag.
+## Build Docker Image
+```
+pwd  # /root/springboot-nfs-kind
+apt install docker.io
+docker build -t vijay2181/springboot-nfs-demo .
+docker login docker.io
+docker push vijay2181/springboot-nfs-demo
 
-### 3. Setup NFS Server (Host Machine)
+```
 
-```bash
-# Create NFS export directory
+## Setup NFS Server (Host Machine)
+```
+sudo apt update
+sudo apt install -y nfs-kernel-server
+
+sudo systemctl enable nfs-server
+sudo systemctl start nfs-server
+sudo systemctl status nfs-server
+
+#Create NFS Export Directory
 sudo mkdir -p /srv/nfs/kind-data
 sudo chown nobody:nogroup /srv/nfs/kind-data
 sudo chmod 777 /srv/nfs/kind-data
 
-# Configure exports
+#Configure Exports
 echo "/srv/nfs/kind-data *(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
-
-# Apply & restart NFS
 sudo exportfs -ra
+sudo exportfs -v
 sudo systemctl restart nfs-server
+
+#Test Local Mount (NFS Client Test)
+sudo apt install -y nfs-common
+sudo mkdir -p /mnt/nfs-test
+sudo mount -t nfs localhost:/srv/nfs/kind-data /mnt/nfs-test
+touch /mnt/nfs-test/hello.txt
+ls -l /mnt/nfs-test
+
 ```
 
-**Get your host IP** (for kind nodes to reach NFS):
-```bash
+## Get Host IP (for K3s nodes to reach NFS)
+```
 HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
 echo "NFS Server IP: $HOST_IP"
+# Update k8s/nfs-pv-pvc.yaml → spec.nfs.server: $HOST_IP
+
 ```
 
-Update `k8s/nfs-pv-pvc.yaml` → `spec.nfs.server: $HOST_IP`
+# K3s Installation
 
-### 4. Create kind Cluster & Deploy
+## Install kubectl
+```
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+kubectl version --client
 
-```bash
-# Create kind cluster
+```
+
+## Firewall Rules
+```
+ufw disable
+ufw allow 6443/tcp # apiserver
+ufw allow from 10.42.0.0/16 to any # pods
+ufw allow from 10.43.0.0/16 to any # services
+```
+
+## Install K3s
+```
+curl -sfL https://get.k3s.io | sh -
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+systemctl status k3s
+kubectl get nodes
+kubectl get all -n kube-system
+
+# Make permanent
+echo "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> ~/.bashrc
+source ~/.bashrc
+```
+
+## Updates
+```
+git clone https://github.com/vijay2181/springboot-nfs-k3s.git
+cd springboot-nfs-k3s
+
+# Update your image tag in k8s/deployment.yaml
+# Update k8s/nfs-pv-pvc.yaml → spec.nfs.server: $HOST_IP
+```
+
+## Deploy
+```
+apt install docker.io git -y
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo systemctl status docker
+
+# Create K3s cluster
 kind create cluster --name nfs-demo
+
+# Configure Docker secret
+kubectl create secret docker-registry mydockerhub \
+  --docker-username=vijay2181 \
+  --docker-password=xxxxxxxx \
+  --docker-server=https://index.docker.io/v1/
 
 # Deploy NFS storage & app
 kubectl apply -f k8s/nfs-pv-pvc.yaml
@@ -83,9 +167,8 @@ kubectl apply -f k8s/deployment.yaml
 kubectl get pods,pv,pvc
 ```
 
-### 5. Test End-to-End
-
-```bash
+## Test End-to-End
+```
 # Port-forward
 kubectl port-forward svc/nfs-demo 8080:80 &
 
@@ -96,98 +179,42 @@ curl -X POST "http://localhost:8080/files?name=demo.txt&content=Hello%20NFS%20Ku
 curl "http://localhost:8080/files/demo.txt"
 ```
 
-**Verify on host** (proof NFS works):
-```bash
+| Method | Endpoint      | Description | Example                                                                  |
+| ------ | ------------- | ----------- | ------------------------------------------------------------------------ |
+| POST   | /files        | Write file  | `curl -X POST "http://localhost:8080/files?name=test.txt&content=hello"` |
+| GET    | /files/{name} | Read file   | `curl "http://localhost:8080/files/test.txt"`                            |
+
+
+```
+Spring Boot NFS app is working exactly as expected:
+POST to /files writes content to the NFS volume (/data).
+GET from /files/<filename> reads it back.
+```
+
+## Verify on Host (Proof NFS Works)
+```
 cat /srv/nfs/kind-data/demo.txt
-# Output: "Hello NFS Kubernetes!\n"
-```
-<img width="1292" height="355" alt="image" src="https://github.com/user-attachments/assets/c6d72820-3f47-4d8a-971c-79daedefdf48" />
-<img width="1292" height="355" alt="image" src="https://github.com/user-attachments/assets/9d6c4d45-a986-46d6-a837-941552615de4" />
-<img width="1292" height="355" alt="image" src="https://github.com/user-attachments/assets/43cb2e8f-dcc3-40ff-b803-6474f1cc8f6d" />
-
-## 🏗️ Architecture
-
-```
-Spring Boot Pod ←── /data → NFS PVC → PV → Host NFS (/srv/nfs/kind-data)
-     ↓
-   REST API ←── curl → Service → Deployment
+# Output: Hello NFS Kubernetes!
 ```
 
-## 📁 File Structure
 
-```
-springboot-nfs-kind-demo/
-├── nfs-demo/                    # Spring Boot app
-│   ├── pom.xml
-│   └── src/main/java/...        # FileController.java
-├── k8s/
-│   ├── nfs-pv-pvc.yaml         # NFS PersistentVolume
-│   └── deployment.yaml         # Deployment + Service
-├── Dockerfile                   # Containerize app
-└── README.md
-```
 
-## 🔧 Customization
 
-### Change NFS Settings
-Edit `k8s/nfs-pv-pvc.yaml`:
-```yaml
-nfs:
-  server: YOUR_HOST_IP      # Host running NFS server
-  path: /srv/nfs/kind-data  # NFS export path
-```
 
-### Scale Deployment
-```yaml
-spec:
-  replicas: 3  # Multiple pods share same NFS (RWX)
-```
 
-### Use External Registry
-```bash
-# deployment.yaml
-image: your-registry/nfs-demo:v1.0
-```
 
-## 🧹 Cleanup
 
-```bash
-# Delete resources
-kubectl delete -f k8s/
-kind delete cluster --name nfs-demo
 
-# NFS (optional)
-sudo umount /srv/nfs/kind-data  # if mounted
-```
 
-## 🎯 API Endpoints
 
-| Method | Endpoint | Description | Example |
-|--------|----------|-------------|---------|
-| `POST` | `/files` | Write file | `curl -X POST "http://localhost:8080/files?name=test.txt&content=hello"` |
-| `GET`  | `/files/{name}` | Read file | `curl "http://localhost:8080/files/test.txt"` |
 
-## Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| `NFS mount failed` | Check `HOST_IP` reachable from kind nodes: `kubectl run -it --rm test --image=busybox --restart=Never --rm nslookup $HOST_IP` |
-| `Permission denied` | `sudo chmod 777 /srv/nfs/kind-data` |
-| `Pod Pending` | `kubectl describe pvc nfs-pvc` |
-| `ImagePullBackOff` | Use `imagePullPolicy: IfNotPresent` or push to registry |
 
-## 📄 License
 
-MIT License - see [LICENSE](LICENSE) © 2025 Tushar Dashpute
 
-***
 
-**⭐ Star this repo if it helped!**  
-**🐛 Issues/PRs welcome** for kind + NFS improvements.
 
-***
 
-*Built for DevOps engineers learning Kubernetes storage patterns*[1][2]
 
-[1](https://spring.io/guides/gs/spring-boot-kubernetes)
-[2](https://github.com/dimMaryanto93/k8s-nfs-springboot-upload)
+
+
